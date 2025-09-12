@@ -75,4 +75,4 @@ def visualize_detection_results(num_samples=10):
     print(f"数据集类型: {dataset_type}, 类别数: {num_classes}")
 
 if __name__ == "__main__":
-    visualize_detection_results(num_samples=20)
+    visualize_detection_results(num_samples=100)

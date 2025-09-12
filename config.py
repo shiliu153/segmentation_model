@@ -2,14 +2,14 @@ import os
 
 class Config:
     # 数据集配置
-    DATASET_TYPE = "severstal"  # 可选: "severstal", "KSDD2"
+    DATASET_TYPE = "KSDD2"  # 可选: "severstal", "KSDD2"
 
     # 模型配置
     MODEL_TYPE = "UNetPlusPlus"  # 可选: "DeepLabV3", "UNet", "FPN", "PSPNet", "Linknet"
-    ENCODER_NAME = "resnet34"  # 可选
+    ENCODER_NAME = "densenet121"  # 可选
     ENCODER_WEIGHTS = None
 
-    USER_RISK_LEVEL_A = 0.3
+    USER_RISK_LEVEL_A = 0.2
 
 
     # Severstal 数据集配置
@@ -20,13 +20,13 @@ class Config:
 
     # KSDD2 数据集配置
     KSDD2_DATA_DIR = "./data/KolektorSDD2/train"
-    KSDD2_IMAGE_SIZE = (232, 648)
+    KSDD2_IMAGE_SIZE = (256, 672)
     KSDD2_NUM_CLASSES = 1
 
     # 训练参数
-    BATCH_SIZE = 1
+    BATCH_SIZE = 4
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 300
+    NUM_EPOCHS = 150
     NUM_WORKERS = 4
 
     # 数据分割

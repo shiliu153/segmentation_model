@@ -122,12 +122,21 @@ class KSDD2DefectDataset(Dataset):
 
         image_path = os.path.join(self.data_dir, img_file)
         image = Image.open(image_path).convert('RGB')
-        image = image.resize((self.image_size[1], self.image_size[0]))
-        image = np.array(image) / 255.0
 
         mask_path = os.path.join(self.data_dir, gt_file)
         mask = Image.open(mask_path).convert('L')
-        mask = mask.resize((self.image_size[1], self.image_size[0]), Image.NEAREST)
+
+        original_size = image.size
+        target_size = (self.image_size[1], self.image_size[0])
+
+        pad_w = target_size[0] - original_size[0]
+        pad_h = target_size[1] - original_size[1]
+
+        from PIL import ImageOps
+        image = ImageOps.expand(image, border=(0, 0, pad_w, pad_h), fill=0)
+        mask = ImageOps.expand(mask, border=(0, 0, pad_w, pad_h), fill=0)
+
+        image = np.array(image) / 255.0
         mask = np.array(mask)
         mask = (mask > 0).astype(np.float32)
         mask = mask[np.newaxis, ...]

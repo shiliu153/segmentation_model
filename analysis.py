@@ -34,7 +34,7 @@ def analyze_thresholds(risk_level_a=0.3):
     print(f"User-specified risk level a = {risk_level_a}")
 
 
-    thresholds = np.linspace(0.00, 1.00, 101)
+    thresholds = np.linspace(0.01, 1.00, 100)
     best_threshold = None
     min_avg_fnr = float('inf')
     best_metrics = {}
