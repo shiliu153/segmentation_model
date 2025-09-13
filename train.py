@@ -15,12 +15,19 @@ from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+import argparse
 
 matplotlib.use('Agg')
 
 def setup_ddp(rank, world_size):
-    """初始化DDP进程组"""
     os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup_ddp():
+    dist.destroy_process_group()
+
 
 
 def rle_decode(mask_rle, shape):
@@ -166,7 +173,6 @@ def dice_loss(pred, target, smooth=1.):
 
 
 def plot_loss_curves(train_losses, test_losses, save_path='loss_curves.png'):
-    """绘制训练和测试loss曲线"""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     plt.figure(figsize=(12, 5))
@@ -196,11 +202,21 @@ def plot_loss_curves(train_losses, test_losses, save_path='loss_curves.png'):
     print(f"Loss曲线已保存到: {save_path}")
 
 
-def train_model():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+def train_model(rank=None, world_size=None):
+    is_ddp = rank is not None and world_size is not None
+    if is_ddp:
+        setup_ddp(rank, world_size)
+        device = torch.device(f'cuda:{rank}')
+        is_main_process = rank == 0
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        is_main_process = True
+    
+    if is_main_process:
+        print(f"使用设备: {device}")
+        if is_ddp:
+            print(f"DDP训练，进程 {rank}/{world_size}")
 
-    # 从配置文件获取参数
     dataset_config = Config.get_dataset_config()
 
     if Config.DATASET_TYPE == "severstal":
@@ -221,20 +237,41 @@ def train_model():
     train_size = int(Config.TRAIN_RATIO * total_size)
     test_size = total_size - train_size
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
-    print(f"train size={train_size}, test size={test_size}")
+    
+    if is_main_process:
+        print(f"train size={train_size}, test size={test_size}")
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=True,
-        num_workers=Config.NUM_WORKERS
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=False,
-        num_workers=Config.NUM_WORKERS
-    )
+    if is_ddp:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=Config.BATCH_SIZE,
+            sampler=train_sampler,
+            num_workers=Config.NUM_WORKERS,
+            pin_memory=True
+        )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=Config.BATCH_SIZE,
+            sampler=test_sampler,
+            num_workers=Config.NUM_WORKERS,
+            pin_memory=True
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=Config.BATCH_SIZE,
+            shuffle=True,
+            num_workers=Config.NUM_WORKERS
+        )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=Config.BATCH_SIZE,
+            shuffle=False,
+            num_workers=Config.NUM_WORKERS
+        )
 
     model = SegmentationModel(
         model_type=Config.MODEL_TYPE,
@@ -242,6 +279,9 @@ def train_model():
         encoder_name=Config.ENCODER_NAME,
         encoder_weights=Config.ENCODER_WEIGHTS
     ).to(device)
+
+    if is_ddp:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
@@ -251,16 +291,25 @@ def train_model():
     test_losses = []
 
     for epoch in range(Config.NUM_EPOCHS):
-        print(f"\n=== Epoch {epoch + 1}/{Config.NUM_EPOCHS} ===")
+        if is_main_process:
+            print(f"\n=== Epoch {epoch + 1}/{Config.NUM_EPOCHS} ===")
+
+        if is_ddp:
+            train_sampler.set_epoch(epoch)
 
         model.train()
         total_loss = 0
+        num_batches = 0
 
-        train_pbar = tqdm(train_loader, desc=f'训练 Epoch {epoch + 1}',
-                          leave=False, dynamic_ncols=True)
+        if is_main_process:
+            train_pbar = tqdm(train_loader, desc=f'训练 Epoch {epoch + 1}',
+                              leave=False, dynamic_ncols=True)
+        else:
+            train_pbar = train_loader
 
         for batch_idx, (images, masks) in enumerate(train_pbar):
-            images, masks = images.to(device), masks.to(device)
+            images, masks = images.to(device, non_blocking=True), masks.to(device, non_blocking=True)
+            
             optimizer.zero_grad()
             outputs = model(images)
             bce_loss = criterion(outputs, masks)
@@ -270,70 +319,101 @@ def train_model():
             optimizer.step()
 
             total_loss += loss.item()
+            num_batches += 1
 
-            train_pbar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
-                'BCE': f'{bce_loss.item():.4f}',
-                'Dice': f'{d_loss.item():.4f}'
-            })
-
-        avg_train_loss = total_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-
-        model.eval()
-        test_loss = 0
-
-        test_pbar = tqdm(test_loader, desc=f'测试 Epoch {epoch + 1}',
-                         leave=False, dynamic_ncols=True)
-
-        with torch.no_grad():
-            for images, masks in test_pbar:
-                images, masks = images.to(device), masks.to(device)
-                outputs = model(images)
-                bce_loss = criterion(outputs, masks)
-                d_loss = dice_loss(outputs, masks)
-                loss = bce_loss + d_loss
-                test_loss += loss.item()
-
-                test_pbar.set_postfix({
+            if is_main_process and hasattr(train_pbar, 'set_postfix'):
+                train_pbar.set_postfix({
                     'Loss': f'{loss.item():.4f}',
                     'BCE': f'{bce_loss.item():.4f}',
                     'Dice': f'{d_loss.item():.4f}'
                 })
 
-        avg_test_loss = test_loss / len(test_loader)
+        if is_ddp:
+            total_loss_tensor = torch.tensor(total_loss, device=device)
+            num_batches_tensor = torch.tensor(num_batches, device=device)
+            dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_batches_tensor, op=dist.ReduceOp.SUM)
+            avg_train_loss = total_loss_tensor.item() / num_batches_tensor.item()
+        else:
+            avg_train_loss = total_loss / num_batches
+
+        train_losses.append(avg_train_loss)
+
+        model.eval()
+        test_loss = 0
+        num_test_batches = 0
+
+        if is_main_process:
+            test_pbar = tqdm(test_loader, desc=f'测试 Epoch {epoch + 1}',
+                             leave=False, dynamic_ncols=True)
+        else:
+            test_pbar = test_loader
+
+        with torch.no_grad():
+            for images, masks in test_pbar:
+                images, masks = images.to(device, non_blocking=True), masks.to(device, non_blocking=True)
+                outputs = model(images)
+                bce_loss = criterion(outputs, masks)
+                d_loss = dice_loss(outputs, masks)
+                loss = bce_loss + d_loss
+                test_loss += loss.item()
+                num_test_batches += 1
+
+                if is_main_process and hasattr(test_pbar, 'set_postfix'):
+                    test_pbar.set_postfix({
+                        'Loss': f'{loss.item():.4f}',
+                        'BCE': f'{bce_loss.item():.4f}',
+                        'Dice': f'{d_loss.item():.4f}'
+                    })
+
+        if is_ddp:
+            test_loss_tensor = torch.tensor(test_loss, device=device)
+            num_test_batches_tensor = torch.tensor(num_test_batches, device=device)
+            dist.all_reduce(test_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_test_batches_tensor, op=dist.ReduceOp.SUM)
+            avg_test_loss = test_loss_tensor.item() / num_test_batches_tensor.item()
+        else:
+            avg_test_loss = test_loss / num_test_batches
+
         test_losses.append(avg_test_loss)
 
         scheduler.step(avg_train_loss)
         current_lr = optimizer.param_groups[0]['lr']
 
-        print(f'Epoch {epoch + 1}/{Config.NUM_EPOCHS}:')
-        print(f'  训练Loss: {avg_train_loss:.4f}')
-        print(f'  测试Loss: {avg_test_loss:.4f}')
-        print(f'  学习率: {current_lr:.6f}')
+        if is_main_process:
+            print(f'Epoch {epoch + 1}/{Config.NUM_EPOCHS}:')
+            print(f'  训练Loss: {avg_train_loss:.4f}')
+            print(f'  测试Loss: {avg_test_loss:.4f}')
+            print(f'  学习率: {current_lr:.6f}')
 
-        if (epoch + 1) % 10 == 0:
+        if is_main_process and (epoch + 1) % 10 == 0:
             model_path = Config.get_model_path()
-            torch.save(model.state_dict(), model_path)
+            model_state_dict = model.module.state_dict() if is_ddp else model.state_dict()
+            torch.save(model_state_dict, model_path)
             print(f'模型已保存到: {model_path}')
 
             plot_loss_curves(train_losses, test_losses,
                              f'loss_curves/{Config.MODEL_TYPE}_{Config.ENCODER_NAME}_{Config.DATASET_TYPE}/loss_curves_epoch_{epoch + 1}.png')
 
-    final_model_path = Config.get_model_path()
-    torch.save(model.state_dict(), final_model_path)
+    if is_main_process:
+        final_model_path = Config.get_model_path()
+        model_state_dict = model.module.state_dict() if is_ddp else model.state_dict()
+        torch.save(model_state_dict, final_model_path)
 
-    plot_loss_curves(train_losses, test_losses,
-                     f'loss_curves/{Config.MODEL_TYPE}_{Config.ENCODER_NAME}_{Config.DATASET_TYPE}/final_loss_curves.png')
+        plot_loss_curves(train_losses, test_losses,
+                         f'loss_curves/{Config.MODEL_TYPE}_{Config.ENCODER_NAME}_{Config.DATASET_TYPE}/final_loss_curves.png')
 
-    loss_data = {
-        'epoch': list(range(1, len(train_losses) + 1)),
-        'train_loss': train_losses,
-        'test_loss': test_losses
-    }
-    loss_df = pd.DataFrame(loss_data)
-    loss_df.to_csv(f'loss_curves/{Config.MODEL_TYPE}_{Config.ENCODER_NAME}_{Config.DATASET_TYPE}/loss_history.csv',
-                   index=False)
+        loss_data = {
+            'epoch': list(range(1, len(train_losses) + 1)),
+            'train_loss': train_losses,
+            'test_loss': test_losses
+        }
+        loss_df = pd.DataFrame(loss_data)
+        loss_df.to_csv(f'loss_curves/{Config.MODEL_TYPE}_{Config.ENCODER_NAME}_{Config.DATASET_TYPE}/loss_history.csv',
+                       index=False)
+
+    if is_ddp:
+        cleanup_ddp()
 
 
 if __name__ == "__main__":
