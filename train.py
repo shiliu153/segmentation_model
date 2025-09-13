@@ -12,8 +12,15 @@ from config import Config
 import matplotlib.pyplot as plt
 import matplotlib
 from tqdm import tqdm
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 matplotlib.use('Agg')
+
+def setup_ddp(rank, world_size):
+    """初始化DDP进程组"""
+    os.environ['MASTER_ADDR'] = 'localhost'
 
 
 def rle_decode(mask_rle, shape):

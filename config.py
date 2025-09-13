@@ -2,7 +2,7 @@ import os
 
 class Config:
     # 数据集配置
-    DATASET_TYPE = "KSDD2"  # 可选: "severstal", "KSDD2"
+    DATASET_TYPE = "severstal"  # 可选: "severstal", "KSDD2"
 
     # 模型配置
     MODEL_TYPE = "UNetPlusPlus"  # 可选: "DeepLabV3", "UNet", "FPN", "PSPNet", "Linknet"
