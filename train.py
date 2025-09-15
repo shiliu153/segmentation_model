@@ -281,7 +281,7 @@ def train_model(rank=None, world_size=None):
     ).to(device)
 
     if is_ddp:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)

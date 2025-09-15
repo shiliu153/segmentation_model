@@ -24,7 +24,7 @@ class Config:
     KSDD2_NUM_CLASSES = 1
 
     # 训练参数
-    BATCH_SIZE = 4
+    BATCH_SIZE = 2
     LEARNING_RATE = 1e-4
     NUM_EPOCHS = 150
     NUM_WORKERS = 4
